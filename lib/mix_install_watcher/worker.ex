@@ -5,6 +5,12 @@ defmodule MixInstallWatcher.Worker do
 
   @installation_check_interval_ms 1_000
 
+  # We debounce the recompilation by a tiny margin to effectively
+  # merge multiple file events. For example, when a project file
+  # changes, Elixir LS modifies several of its data files in the
+  # project directory, but don't want to recompile on every event
+  @recompile_debounce_ms 5
+
   def start_link(_opts) do
     GenServer.start_link(__MODULE__, {})
   end
@@ -12,7 +18,7 @@ defmodule MixInstallWatcher.Worker do
   @impl true
   def init({}) do
     schedule_installation_check()
-    {:ok, {}}
+    {:ok, %{recompile_timer_ref: nil}}
   end
 
   @impl true
@@ -29,13 +35,23 @@ defmodule MixInstallWatcher.Worker do
   end
 
   def handle_info({:file_event, _watcher_pid, {_path, _events}}, state) do
+    if ref = state.recompile_timer_ref do
+      Process.cancel_timer(ref)
+    end
+
+    recompile_timer_ref = Process.send_after(self(), :recompile, @recompile_debounce_ms)
+
+    {:noreply, %{state | recompile_timer_ref: recompile_timer_ref}}
+  end
+
+  def handle_info(:recompile, state) do
     try do
       IEx.Helpers.recompile()
     catch
       _error -> :error
     end
 
-    {:noreply, state}
+    {:noreply, %{state | recompile_timer_ref: nil}}
   end
 
   defp schedule_installation_check() do
