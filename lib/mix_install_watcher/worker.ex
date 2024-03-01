@@ -5,11 +5,15 @@ defmodule MixInstallWatcher.Worker do
 
   @installation_check_interval_ms 1_000
 
-  # We debounce the recompilation by a tiny margin to effectively
-  # merge multiple file events. For example, when a project file
-  # changes, Elixir LS modifies several of its data files in the
-  # project directory, but don't want to recompile on every event
+  # We debounce the recompilation by a tiny margin to merge multiple
+  # file events. For example, Git operations may effectively modify
+  # multiple files and we don't want to recompile on every event
   @recompile_debounce_ms 5
+
+  # Within each watched project, we ignore top-level directories
+  # based on the exclude pattern. This matches directories such as
+  # .elixir_ls and _build
+  @exclude_pattern ~r/^[._]/
 
   def start_link(_opts) do
     GenServer.start_link(__MODULE__, {})
@@ -24,8 +28,7 @@ defmodule MixInstallWatcher.Worker do
   @impl true
   def handle_info(:installation_check, state) do
     if Mix.installed?() do
-      paths = local_deps_paths()
-      {:ok, pid} = FileSystem.start_link(dirs: paths)
+      {:ok, pid} = FileSystem.start_link(dirs: watch_paths())
       FileSystem.subscribe(pid)
     else
       schedule_installation_check()
@@ -58,6 +61,13 @@ defmodule MixInstallWatcher.Worker do
     Process.send_after(self(), :installation_check, @installation_check_interval_ms)
   end
 
+  defp watch_paths() do
+    for path <- local_deps_paths(),
+        dirname <- File.ls!(path),
+        not exclude?(dirname),
+        do: Path.join(path, dirname)
+  end
+
   defp local_deps_paths() do
     # Note that this is a private API, but this package is just a dev
     # utility, so it is fine
@@ -68,5 +78,9 @@ defmodule MixInstallWatcher.Worker do
         Map.fetch!(deps_paths, dep)
       end
     end)
+  end
+
+  defp exclude?(dirname) do
+    Regex.match?(@exclude_pattern, dirname)
   end
 end
